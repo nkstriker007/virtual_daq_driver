@@ -4,6 +4,7 @@
 #include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
+#include <linux/uaccess.h>
 
 #define VDAQ_NAME "virtual_daq"
 #define VDAQ_DEVICE_COUNT 1
@@ -14,17 +15,27 @@ static struct device *vdaq_device;
 static int vdaq_open(struct inode *inode, struct file *file)
 {
 	pr_info("virtual_daq: device opened\n");
-	return 0;
+	return stream_open(inode,file);
 }
 static int vdaq_release(struct inode *inode,struct file *file){
 	pr_info("virtual_daq:device released\n");
 	return 0;
 }
-
+static ssize_t vdaq_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
+{
+	s32 sample=123000;
+	if(count< sizeof(sample))
+		return -EINVAL;
+	if(copy_to_user(buf,&sample,sizeof(sample)))
+		return -EFAULT;
+	pr_debug("virtual_daq: device read\n");
+	return sizeof(sample);
+}
 static const struct file_operations vdaq_fops={
 	.owner=THIS_MODULE,
 	.open=vdaq_open,
 	.release=vdaq_release,
+	.read=vdaq_read,
 };
 static int __init virtual_daq_init(void)
 {

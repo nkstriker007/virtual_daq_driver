@@ -8,3 +8,7 @@
 .tmp_versions/
 
 .vscode/
+# Editor swap/backup files
+*.swp
+*.swo
+*~

@@ -1,3 +1,5 @@
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -6,19 +8,25 @@
 #include <linux/device.h>
 #include <linux/uaccess.h>
 
+
 #define VDAQ_NAME "virtual_daq"
 #define VDAQ_DEVICE_COUNT 1
+
 static dev_t vdaq_devno;
 static struct cdev vdaq_cdev;
 static struct class *vdaq_class;
 static struct device *vdaq_device;
+static int fail_step;
+
 static int vdaq_open(struct inode *inode, struct file *file)
+
+
 {
-	pr_info("virtual_daq: device opened\n");
+	pr_info("device opened\n");
 	return stream_open(inode,file);
 }
 static int vdaq_release(struct inode *inode,struct file *file){
-	pr_info("virtual_daq:device released\n");
+	pr_info("device released\n");
 	return 0;
 }
 static ssize_t vdaq_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
@@ -28,7 +36,7 @@ static ssize_t vdaq_read(struct file *file, char __user *buf, size_t count, loff
 		return -EINVAL;
 	if(copy_to_user(buf,&sample,sizeof(sample)))
 		return -EFAULT;
-	pr_debug("virtual_daq: device read\n");
+	pr_debug("device read\n");
 	return sizeof(sample);
 }
 static const struct file_operations vdaq_fops={
@@ -42,8 +50,12 @@ static int __init virtual_daq_init(void)
 	int ret;
 	ret=alloc_chrdev_region(&vdaq_devno,0,VDAQ_DEVICE_COUNT,VDAQ_NAME);
 	if(ret<0){
-		pr_err("virtual_daq :failed to allocate device no %d\n",ret);
+		pr_err("failed to allocate device no %d\n",ret);
 		return ret;
+	}
+	if (fail_step == 1) {  
+		ret=-ENOMEM;                 /* test hook */
+		goto err_unregister;
 	}
 	unsigned int major=MAJOR(vdaq_devno);
 	unsigned int minor=MINOR(vdaq_devno);
@@ -52,26 +64,41 @@ static int __init virtual_daq_init(void)
 	vdaq_cdev.owner=THIS_MODULE;
 	ret= cdev_add(&vdaq_cdev,vdaq_devno,VDAQ_DEVICE_COUNT);
 	if(ret<0){
-		pr_err("virtual_daq: failed to register the device %d ",ret);
+		pr_err("failed to register the device %d ",ret);
 		goto err_unregister;
+	}
+	if (fail_step == 2) {  
+		ret=-ENOMEM;                 /* test hook */
+		goto err_cdev_del;
 	}
 	vdaq_class=class_create(VDAQ_NAME);
 	if(IS_ERR(vdaq_class)) {
 		ret=PTR_ERR(vdaq_class);
-		pr_err("virtual_daq: failed to create class\n");
+		pr_err("failed to create class\n");
 		goto err_cdev_del;
 	}
+	if (fail_step == 3) { 
+		ret=-ENOMEM;                  /* test hook */
+		goto err_class_destroy;
+	}
+	
 	vdaq_device=device_create(vdaq_class,NULL,vdaq_devno,NULL,"vdaq%d",MINOR(vdaq_devno));
 	if(IS_ERR(vdaq_device)) {
 		ret=PTR_ERR(vdaq_device);
-		pr_err("virtual_daq: failed to create device\n");
+		pr_err("failed to create device\n");
 		goto err_class_destroy;
 	}
+	if (fail_step == 4) {                   /* test hook */
+		ret = -ENOMEM;
+		goto err_device_destroy;
+	}
 
-	pr_info("virtual_daq: sucessfully registed  the device %d",ret);
-	pr_info("virtual_daq :sucessfully loaded %d %d ",major,minor);
+	pr_info("sucessfully registed  the device %d",ret);
+	pr_info("sucessfully loaded %d %d ",major,minor);
 	
 	return 0;
+	err_device_destroy:
+		device_destroy(vdaq_class, vdaq_devno);
 	err_class_destroy:
 		class_destroy(vdaq_class);
 	err_cdev_del:
@@ -87,11 +114,14 @@ static void __exit virtual_daq_exit(void)
 	class_destroy(vdaq_class);
 	cdev_del(&vdaq_cdev);
 	unregister_chrdev_region(vdaq_devno,VDAQ_DEVICE_COUNT);
-	pr_info("virtual_daq: unloaded sucessfully\n");
+	pr_info("unloaded sucessfully\n");
 }
 
 module_init(virtual_daq_init);
 module_exit(virtual_daq_exit);
+module_param(fail_step, int, 0444);
+
+MODULE_PARM_DESC(fail_step, "Testing only: force init to fail after step N (1-4)");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("VIRTUAL DAQ SERVER");
 MODULE_AUTHOR("Narayan Krishna");

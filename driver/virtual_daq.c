@@ -6,8 +6,10 @@
 #include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
+#include <linux/timer.h>
 #include <linux/uaccess.h>
-
+#include <linux/spinlock.h>
+#include <linux/jiffies.h>
 
 #define VDAQ_NAME "virtual_daq"
 #define VDAQ_DEVICE_COUNT 1
@@ -18,24 +20,49 @@ static struct class *vdaq_class;
 static struct device *vdaq_device;
 static int fail_step;
 
-static int vdaq_open(struct inode *inode, struct file *file)
-
-
+struct vdaq_device
 {
+	spinlock_t lock; /*guards the data below*/
+	struct timer_list timer;
+	unsigned int period_ms;
+	u32 sample_index; /* shared state*/
+	s32 latest_sample; /* shared state*/
+};
+static struct vdaq_device vdaq;
+static int vdaq_open(struct inode *inode, struct file *file)
+{
+	file->private_data=&vdaq;
 	pr_info("device opened\n");
 	return stream_open(inode,file);
 }
+
 static int vdaq_release(struct inode *inode,struct file *file){
 	pr_info("device released\n");
 	return 0;
 }
+
+static void vdaq_timer_fn(struct timer_list *t)
+{
+	struct vdaq_device *dev = timer_container_of(dev, t, timer);
+	spin_lock(&dev->lock);
+	dev->latest_sample=100000+(dev->sample_index %100000);
+	dev->sample_index++;
+	spin_unlock(&dev->lock);
+	mod_timer(&dev->timer, jiffies + msecs_to_jiffies(dev->period_ms));
+}
 static ssize_t vdaq_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
-	s32 sample=123000;
-	if(count< sizeof(sample))
+	s32 sample;
+	if(count< sizeof(sample)) {
 		return -EINVAL;
-	if(copy_to_user(buf,&sample,sizeof(sample)))
+	}
+	struct vdaq_device *dev = file->private_data;
+	spin_lock_bh(&dev->lock);
+	sample=dev->latest_sample;
+	spin_unlock_bh(&dev->lock);
+	if(copy_to_user(buf,&sample,sizeof(sample))) {
 		return -EFAULT;
+	}
 	pr_debug("device read\n");
 	return sizeof(sample);
 }
@@ -48,6 +75,9 @@ static const struct file_operations vdaq_fops={
 static int __init virtual_daq_init(void)
 {
 	int ret;
+	spin_lock_init(&vdaq.lock);
+	timer_setup(&vdaq.timer, vdaq_timer_fn, 0);
+	vdaq.period_ms = 100; /* default period */
 	ret=alloc_chrdev_region(&vdaq_devno,0,VDAQ_DEVICE_COUNT,VDAQ_NAME);
 	if(ret<0){
 		pr_err("failed to allocate device no %d\n",ret);
@@ -62,7 +92,7 @@ static int __init virtual_daq_init(void)
 
 	cdev_init(&vdaq_cdev,&vdaq_fops);
 	vdaq_cdev.owner=THIS_MODULE;
-	ret= cdev_add(&vdaq_cdev,vdaq_devno,VDAQ_DEVICE_COUNT);
+	ret=cdev_add(&vdaq_cdev,vdaq_devno,VDAQ_DEVICE_COUNT);
 	if(ret<0){
 		pr_err("failed to register the device %d ",ret);
 		goto err_unregister;
@@ -95,7 +125,7 @@ static int __init virtual_daq_init(void)
 
 	pr_info("sucessfully registed  the device %d",ret);
 	pr_info("sucessfully loaded %d %d ",major,minor);
-	
+	mod_timer(&vdaq.timer, jiffies + msecs_to_jiffies(vdaq.period_ms));
 	return 0;
 	err_device_destroy:
 		device_destroy(vdaq_class, vdaq_devno);
@@ -110,6 +140,7 @@ static int __init virtual_daq_init(void)
 
 static void __exit virtual_daq_exit(void)
 {
+	timer_shutdown_sync(&vdaq.timer);
 	device_destroy(vdaq_class, vdaq_devno);
 	class_destroy(vdaq_class);
 	cdev_del(&vdaq_cdev);

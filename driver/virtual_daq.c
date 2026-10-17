@@ -10,9 +10,11 @@
 #include <linux/uaccess.h>
 #include <linux/spinlock.h>
 #include <linux/jiffies.h>
+#include <linux/kfifo.h>
 
 #define VDAQ_NAME "virtual_daq"
 #define VDAQ_DEVICE_COUNT 1
+#define VDAQ_READ_MAX 64
 
 static dev_t vdaq_devno;
 static struct cdev vdaq_cdev;
@@ -25,8 +27,10 @@ struct vdaq_device
 	spinlock_t lock; /*guards the data below*/
 	struct timer_list timer;
 	unsigned int period_ms;
-	u32 sample_index; /* shared state*/
-	s32 latest_sample; /* shared state*/
+	u32 sample_index;
+	u32 overruns; /* shared state*/
+	DECLARE_KFIFO(fifo,s32,1024); /*shared queue */
+
 };
 static struct vdaq_device vdaq;
 static int vdaq_open(struct inode *inode, struct file *file)
@@ -45,26 +49,36 @@ static void vdaq_timer_fn(struct timer_list *t)
 {
 	struct vdaq_device *dev = timer_container_of(dev, t, timer);
 	spin_lock(&dev->lock);
-	dev->latest_sample=100000+(dev->sample_index %100000);
+	s32 sample = 100000 + (dev->sample_index % 100000);
 	dev->sample_index++;
+	if(kfifo_is_full(&dev->fifo)){
+		kfifo_skip(&dev->fifo);
+		dev->overruns++;
+	}
+	kfifo_put(&dev->fifo,sample);
 	spin_unlock(&dev->lock);
 	mod_timer(&dev->timer, jiffies + msecs_to_jiffies(dev->period_ms));
 }
 static ssize_t vdaq_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
-	s32 sample;
-	if(count< sizeof(sample)) {
+	s32 samples[VDAQ_READ_MAX];
+	unsigned int samples_got;
+	if(count< sizeof(s32)) {
 		return -EINVAL;
 	}
 	struct vdaq_device *dev = file->private_data;
+	size_t want = min_t(size_t, count / sizeof(s32), VDAQ_READ_MAX);
 	spin_lock_bh(&dev->lock);
-	sample=dev->latest_sample;
+	samples_got=kfifo_out(&dev->fifo,samples,want);
 	spin_unlock_bh(&dev->lock);
-	if(copy_to_user(buf,&sample,sizeof(sample))) {
+	if(samples_got == 0) {
+		return -EAGAIN;
+	}
+	if(copy_to_user(buf,samples,samples_got * sizeof(s32))) {
 		return -EFAULT;
 	}
 	pr_debug("device read\n");
-	return sizeof(sample);
+	return samples_got * sizeof(s32);
 }
 static const struct file_operations vdaq_fops={
 	.owner=THIS_MODULE,
@@ -76,6 +90,7 @@ static int __init virtual_daq_init(void)
 {
 	int ret;
 	spin_lock_init(&vdaq.lock);
+	INIT_KFIFO(vdaq.fifo);
 	timer_setup(&vdaq.timer, vdaq_timer_fn, 0);
 	vdaq.period_ms = 100; /* default period */
 	ret=alloc_chrdev_region(&vdaq_devno,0,VDAQ_DEVICE_COUNT,VDAQ_NAME);
